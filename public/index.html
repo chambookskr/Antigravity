@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>네이버 플레이스 노출 키워드 추출기</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace">
+        <div class="intro">
+          <p class="eyebrow">Naver Place Keyword Extractor</p>
+          <h1>네이버 플레이스 노출 키워드 추출기</h1>
+          <p class="subcopy">
+            URL, 연도, 월을 선택하면 4개 광고 그룹의 렌더링된 키워드 테이블에서 노출수와 키워드를 읽어 정리합니다.
+          </p>
+        </div>
+
+        <section class="tool-grid" aria-label="노출 키워드 추출 도구">
+          <form class="panel input-panel" id="extract-form">
+            <div class="field">
+              <label for="url-input">네이버 URL</label>
+              <input
+                id="url-input"
+                type="url"
+                inputmode="url"
+                placeholder="https://..."
+                value="https://ads.naver.com/manage/ad-accounts/1932448/sa/campaigns/cmp-a001-01-000000010367579"
+              />
+            </div>
+
+            <div class="field">
+              <label for="year-input">연도</label>
+              <input id="year-input" type="number" min="2020" max="2030" value="2026" />
+            </div>
+
+            <fieldset class="month-box">
+              <legend>추출할 월</legend>
+              <div class="month-grid">
+                <label><input type="checkbox" name="month" value="1" checked /> 1월</label>
+                <label><input type="checkbox" name="month" value="2" /> 2월</label>
+                <label><input type="checkbox" name="month" value="3" /> 3월</label>
+                <label><input type="checkbox" name="month" value="4" /> 4월</label>
+                <label><input type="checkbox" name="month" value="5" /> 5월</label>
+                <label><input type="checkbox" name="month" value="6" /> 6월</label>
+                <label><input type="checkbox" name="month" value="7" /> 7월</label>
+                <label><input type="checkbox" name="month" value="8" /> 8월</label>
+                <label><input type="checkbox" name="month" value="9" /> 9월</label>
+                <label><input type="checkbox" name="month" value="10" /> 10월</label>
+                <label><input type="checkbox" name="month" value="11" /> 11월</label>
+                <label><input type="checkbox" name="month" value="12" /> 12월</label>
+              </div>
+            </fieldset>
+
+            <fieldset class="group-box">
+              <legend>광고 그룹</legend>
+              <div class="group-list">
+                <span>니즈키워드</span>
+                <span>지역+마음수련</span>
+                <span>지역+명상</span>
+                <span>지역+상담</span>
+              </div>
+            </fieldset>
+
+            <div class="actions">
+              <button class="secondary" id="login-button" type="button">Chrome 로그인 열기</button>
+              <button class="primary" type="submit">노출 키워드 추출</button>
+              <button class="ghost" id="clear-button" type="button">초기화</button>
+            </div>
+
+            <p class="status" id="status" role="status">준비되었습니다.</p>
+          </form>
+
+          <section class="panel result-panel" aria-label="추출 결과">
+            <div class="result-header">
+              <div>
+                <p class="eyebrow">Excel Ready</p>
+                <h2>노출수 높은 순</h2>
+              </div>
+              <div class="result-actions">
+                <button class="secondary compact" id="copy-button" type="button" disabled>복사</button>
+                <a class="secondary compact link-button disabled" id="csv-link" href="#" aria-disabled="true">CSV 저장</a>
+              </div>
+            </div>
+
+            <div class="summary" id="summary">결과는 노출수와 키워드 두 칸으로 표시됩니다.</div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>노출수</th>
+                    <th>키워드</th>
+                  </tr>
+                </thead>
+                <tbody id="result-body">
+                  <tr class="empty-row">
+                    <td colspan="2">아직 추출된 결과가 없습니다.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
