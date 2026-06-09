@@ -266,27 +266,51 @@ async function firstVisible(currentPage, selectors) {
   return undefined;
 }
 
-async function clickText(currentPage, text) {
+async function waitForClickableText(currentPage, text, timeout = 10000) {
   const escaped = text.replace(/"/g, '\\"');
-  const locator = await firstVisible(currentPage, [
+  const selectors = [
     `button:has-text("${escaped}")`,
     `a:has-text("${escaped}")`,
     `[role="button"]:has-text("${escaped}")`,
     `[role="link"]:has-text("${escaped}")`,
-    `[role="row"]:has-text("${escaped}")`,
-    `[role="gridcell"]:has-text("${escaped}")`,
-    `text="${escaped}"`,
-  ]);
+    `text="${escaped}"`
+  ];
 
-  if (!locator) return false;
-  await locator.click({ timeout: 12000 }).catch(() => {});
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeout) {
+    for (const frame of await visibleFrames(currentPage)) {
+      for (const selector of selectors) {
+        try {
+          const locator = frame.locator(selector);
+          const count = await locator.count().catch(() => 0);
+          for (let index = 0; index < count; index += 1) {
+            const item = locator.nth(index);
+            if (await item.isVisible().catch(() => false) && await item.isEnabled().catch(() => false)) {
+              return item;
+            }
+          }
+        } catch {}
+      }
+    }
+    await currentPage.waitForTimeout(200);
+  }
+  return undefined;
+}
+
+async function clickText(currentPage, text, timeout = 12000) {
+  const locator = await waitForClickableText(currentPage, text, timeout);
+  if (!locator) {
+    console.log(`[DEBUG] clickText failed: "${text}" not found/clickable within ${timeout}ms`);
+    return false;
+  }
+  await locator.click({ timeout }).catch(() => {});
   await waitForRendered(currentPage);
   return true;
 }
 
-async function openDatePanel(currentPage) {
+async function openDatePanel(currentPage, timeout = 10000) {
   console.log(`[DEBUG] Running openDatePanel...`);
-  const locator = await firstVisible(currentPage, [
+  const selectors = [
     'input[placeholder*="날짜"]',
     'input[placeholder*="기간"]',
     'input[aria-label*="날짜"]',
@@ -305,7 +329,26 @@ async function openDatePanel(currentPage) {
     '[role="button"]:has-text("지난")',
     '[role="button"]:has-text("~")',
     '[role="button"]:has-text(".")',
-  ]);
+  ];
+
+  const startTime = Date.now();
+  let locator;
+  while (Date.now() - startTime < timeout) {
+    for (const frame of await visibleFrames(currentPage)) {
+      for (const selector of selectors) {
+        try {
+          const item = frame.locator(selector).first();
+          if (await item.isVisible().catch(() => false)) {
+            locator = item;
+            break;
+          }
+        } catch {}
+      }
+      if (locator) break;
+    }
+    if (locator) break;
+    await currentPage.waitForTimeout(200);
+  }
 
   if (locator) {
     console.log(`[DEBUG] Found date panel button/input to click.`);
@@ -443,40 +486,56 @@ async function applyDateRange(currentPage, period) {
   return range.label;
 }
 
-async function openKeywordTab(currentPage) {
-  let opened = false;
-  for (const frame of await visibleFrames(currentPage)) {
-    // Look for exact "키워드" text inside clickable elements to avoid matching ad group titles like "니즈키워드"
-    const selectors = [
-      'button:text-is("키워드")',
-      'a:text-is("키워드")',
-      '[role="tab"]:text-is("키워드")',
-      '[role="button"]:text-is("키워드")',
-      'text="키워드"'
-    ];
-    for (const selector of selectors) {
-      const locator = frame.locator(selector);
-      const count = await locator.count().catch(() => 0);
-      for (let index = 0; index < count; index += 1) {
-        const item = locator.nth(index);
-        if (await item.isVisible().catch(() => false)) {
-          const text = String(await item.innerText().catch(() => "")).trim();
-          if (text === "키워드") {
-            await item.click({ timeout: 8000 }).catch(() => {});
-            opened = true;
-            break;
+async function openKeywordTab(currentPage, timeout = 10000) {
+  console.log(`[DEBUG] Running openKeywordTab...`);
+  const startTime = Date.now();
+  const selectors = [
+    'button:text-is("키워드")',
+    'a:text-is("키워드")',
+    '[role="tab"]:text-is("키워드")',
+    '[role="button"]:text-is("키워드")',
+    'text="키워드"'
+  ];
+
+  while (Date.now() - startTime < timeout) {
+    let opened = false;
+    for (const frame of await visibleFrames(currentPage)) {
+      for (const selector of selectors) {
+        const locator = frame.locator(selector);
+        const count = await locator.count().catch(() => 0);
+        for (let index = 0; index < count; index += 1) {
+          const item = locator.nth(index);
+          if (await item.isVisible().catch(() => false)) {
+            const text = String(await item.innerText().catch(() => "")).trim();
+            if (text === "키워드") {
+              const isActive = await item.getAttribute("aria-selected").catch(() => "") === "true" ||
+                               await item.evaluate(el => el.classList.contains("active") || 
+                                                     el.classList.contains("ant-tabs-tab-active") || 
+                                                     el.classList.contains("is-active") ||
+                                                     el.classList.contains("on")).catch(() => false);
+              if (isActive) {
+                console.log(`[DEBUG] "키워드" tab is already active.`);
+                return true;
+              }
+              await item.click({ timeout: 5000 }).catch(() => {});
+              opened = true;
+              break;
+            }
           }
         }
+        if (opened) break;
       }
       if (opened) break;
     }
-    if (opened) break;
+    if (opened) {
+      await waitForRendered(currentPage);
+      await currentPage.waitForTimeout(1000);
+      return true;
+    }
+    await currentPage.waitForTimeout(200);
   }
-
-  if (opened) {
-    await waitForRendered(currentPage);
-    await currentPage.waitForTimeout(1000);
-  }
+  console.log(`[DEBUG] Failed to open "키워드" tab within ${timeout}ms`);
+  return false;
 }
 
 async function waitForTableRows(frame) {
@@ -862,11 +921,33 @@ async function extractByMonths(url, year, months, id, pw) {
     const raw = [];
     const errors = [];
 
-    for (const period of periods) {
-      const periodLabel = await applyDateRange(currentPage, period);
-      const result = await readGroups(currentPage, periodLabel, targetUrl);
-      raw.push(...result.raw);
-      errors.push(...result.errors);
+    for (const group of targetGroups) {
+      console.log(`[DEBUG] Navigating to campaign URL to click group: ${group}`);
+      await currentPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+      await waitForRendered(currentPage);
+
+      const opened = await clickText(currentPage, group);
+      if (!opened) {
+        errors.push(`모든 월 / ${group}: 광고 그룹을 찾지 못했습니다.`);
+        continue;
+      }
+
+      await openKeywordTab(currentPage);
+
+      for (const period of periods) {
+        try {
+          const periodLabel = await applyDateRange(currentPage, period);
+          const rows = await readKeywordTable(currentPage, group, periodLabel);
+          if (!rows || !rows.length) {
+            errors.push(`${periodLabel} / ${group}: 키워드와 노출수 테이블을 찾지 못했습니다.`);
+          } else {
+            raw.push(...rows);
+          }
+        } catch (err) {
+          console.error(`[ERROR] Failed to extract period ${period.year}년 ${period.month}월 for group ${group}:`, err);
+          errors.push(`${period.year}년 ${period.month}월 / ${group}: 오류 - ${err.message}`);
+        }
+      }
     }
 
     const rows = aggregateRows(raw);
