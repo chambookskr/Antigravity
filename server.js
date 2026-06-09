@@ -705,6 +705,37 @@ async function clickNextPage(frame) {
   return false;
 }
 
+async function goToPage1(frame) {
+  const page1Selectors = [
+    'li.ant-pagination-item-1',
+    '[class*="pagination"] li.ant-pagination-item-1',
+    '[class*="pagination"] a.ant-pagination-item-1',
+    '[class*="pagination"] [class*="pagination-item-1"]',
+    '[class*="pagination"] [class*="pagination-item"] a:text-is("1")',
+    '[class*="pagination"] a:text-is("1")',
+    '[class*="pagination"] button:text-is("1")',
+    '[class*="pagination"] [class*="item"]:has-text("1")'
+  ];
+
+  for (const selector of page1Selectors) {
+    try {
+      const item = frame.locator(selector).first();
+      if (await item.isVisible().catch(() => false)) {
+        const isActive = await item.evaluate(el => el.classList.contains('ant-pagination-item-active') || el.classList.contains('active')).catch(() => false);
+        if (isActive) {
+          console.log(`[DEBUG] Already on Page 1.`);
+          return true;
+        }
+        console.log(`[DEBUG] Clicking Page 1 button using selector: ${selector}`);
+        await item.click({ timeout: 5000 }).catch(() => {});
+        await frame.page().waitForTimeout(1000);
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
 function getPageSignature(rows) {
   if (!rows || rows.length < 2) return "";
   return rows.slice(1, 4).map(r => r.join(" ")).join("\n");
@@ -741,9 +772,14 @@ function parseKeywordRows(rows, group, period) {
   const columns = detectColumns(rows);
   const parsed = [];
 
+  console.log(`[DEBUG]   parseKeywordRows: columns detected:`, columns);
+
   rows.forEach((cells, rowIndex) => {
     if (!cells.length) return;
-    if (columns && rowIndex <= columns.headerRow) return;
+    if (columns && rowIndex <= columns.headerRow) {
+      console.log(`[DEBUG]     Skipping header/meta row ${rowIndex}: ${cells.join(" | ")}`);
+      return;
+    }
 
     let keyword = "";
     let impressions = NaN;
@@ -760,7 +796,10 @@ function parseKeywordRows(rows, group, period) {
       impressions = numbers.length ? Math.max(...numbers) : NaN;
     }
 
-    if (isKeyword(keyword) && Number.isFinite(impressions) && impressions >= 1) {
+    const accepted = isKeyword(keyword) && Number.isFinite(impressions) && impressions >= 1;
+    console.log(`[DEBUG]     Row ${rowIndex}: keyword="${keyword}", impressions=${impressions}, accepted=${accepted} | cells: ${cells.join(" | ")}`);
+
+    if (accepted) {
       parsed.push({ group, period, keyword, impressions });
     }
   });
@@ -836,6 +875,11 @@ async function readKeywordTable(currentPage, group, period) {
   
   const activeFrames = primaryFrame ? [primaryFrame] : frames;
   for (const frame of activeFrames) {
+    // Reset page back to page 1 before scraping
+    await goToPage1(frame).catch((err) => {
+      console.log(`[DEBUG] goToPage1 failed or not needed: ${err.message}`);
+    });
+    
     let pageNum = 1;
     while (true) {
       console.log(`[DEBUG] Reading page ${pageNum} for group ${group}...`);
@@ -1144,6 +1188,57 @@ const server = http.createServer(async (req, res) => {
         app: "naver-place-keyword-extractor",
         profile: activeProfileDir,
       });
+      return;
+    }
+
+    if (req.method === "GET" && req.url === "/api/list-campaigns") {
+      try {
+        const currentPage = await page();
+        const currentUrl = currentPage.url();
+        console.log(`[DEBUG] /api/list-campaigns called. Current URL: ${currentUrl}`);
+        
+        // 1. Navigate to the main campaigns page
+        await currentPage.goto('https://ads.naver.com/manage/ad-accounts/2152870/sa/campaigns', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+        await waitForRendered(currentPage);
+        
+        const results = {};
+        
+        // Helper to extract campaigns on current view
+        const getCampaignsOnView = async () => {
+          const frames = await visibleFrames(currentPage);
+          const list = [];
+          for (const frame of frames) {
+            const links = frame.locator('a');
+            const count = await links.count().catch(() => 0);
+            for (let i = 0; i < count; i++) {
+              const link = links.nth(i);
+              const href = await link.getAttribute('href').catch(() => '');
+              const linkText = await link.innerText().catch(() => '');
+              if (href && href.includes('/sa/campaigns/cmp-')) {
+                list.push({ text: linkText.trim().replace(/\n/g, ' '), href });
+              }
+            }
+          }
+          return list;
+        };
+
+        // Get Powerlink campaigns (default view)
+        results.powerlink = await getCampaignsOnView();
+        
+        // Click "플레이스" tab/menu in left sidebar to view Place campaigns
+        console.log('[DEBUG] Clicking "플레이스" sidebar menu...');
+        const placeClicked = await clickText(currentPage, "플레이스");
+        console.log('[DEBUG] Place menu clicked:', placeClicked);
+        if (placeClicked) {
+          await currentPage.waitForTimeout(2000);
+          await waitForRendered(currentPage);
+          results.place = await getCampaignsOnView();
+        }
+        
+        sendJson(res, 200, { ok: true, campaigns: results, currentUrl });
+      } catch (err) {
+        sendJson(res, 500, { ok: false, error: err.message });
+      }
       return;
     }
 
