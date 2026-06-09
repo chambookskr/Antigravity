@@ -1,0 +1,10 @@
+# Git ignore for Naver Place Keyword Ranker
+node_modules/
+chrome-profile/
+chrome-profile-session-*/
+playwright-profile/
+exports/
+*.log
+.system_generated/
+.DS_Store
+Thumbs.db
