@@ -467,10 +467,39 @@ async function fillVisibleDateInputs(currentPage, range) {
         startVal += ".";
         endVal += ".";
       }
+
+      // Read current values to decide the fill order
+      const currStartVal = normalizeText(await startInput.inputValue().catch(() => ""));
+      const currEndVal = normalizeText(await endInput.inputValue().catch(() => ""));
+      console.log(`[DEBUG]   Current input values: start="${currStartVal}", end="${currEndVal}"`);
       
-      console.log(`[DEBUG]   Filling inputs in Frame [${fIdx}]: startVal="${startVal}", endVal="${endVal}"`);
-      await setInputValue(startInput, startVal);
-      await setInputValue(endInput, endVal);
+      // Smart fill order based on date range validation constraints
+      const parseDateNum = (str) => {
+        const cleaned = str.replace(/[^0-9]/g, "");
+        return cleaned ? Number(cleaned) : 0;
+      };
+
+      const sNew = parseDateNum(startVal);
+      const eNew = parseDateNum(endVal);
+      const sCurr = parseDateNum(currStartVal);
+      const eCurr = parseDateNum(currEndVal);
+
+      if (sNew > eCurr && eCurr > 0) {
+        console.log(`[DEBUG]   Smart Fill Order: Setting END first (sNew=${sNew} > eCurr=${eCurr})`);
+        await setInputValue(endInput, endVal);
+        await currentPage.waitForTimeout(500);
+        await setInputValue(startInput, startVal);
+      } else if (eNew < sCurr && sCurr > 0) {
+        console.log(`[DEBUG]   Smart Fill Order: Setting START first (eNew=${eNew} < sCurr=${sCurr})`);
+        await setInputValue(startInput, startVal);
+        await currentPage.waitForTimeout(500);
+        await setInputValue(endInput, endVal);
+      } else {
+        console.log(`[DEBUG]   Smart Fill Order: Default order (START then END)`);
+        await setInputValue(startInput, startVal);
+        await currentPage.waitForTimeout(500);
+        await setInputValue(endInput, endVal);
+      }
       return true;
     }
 
@@ -486,6 +515,26 @@ async function fillVisibleDateInputs(currentPage, range) {
     }
   }
 
+  return false;
+}
+
+async function waitForGridDateRange(frame, range, timeout = 10000) {
+  const startTime = Date.now();
+  const startDot = range.startDotted;
+  const endDot = range.endDotted;
+  
+  console.log(`[DEBUG] Waiting for grid to show date range: ${startDot} ~ ${endDot}`);
+  
+  while (Date.now() - startTime < timeout) {
+    const text = await frame.locator("body").innerText().catch(() => "");
+    if (text.includes(startDot) && text.includes(endDot)) {
+      console.log(`[DEBUG] Grid successfully updated to show date range.`);
+      return true;
+    }
+    await frame.page().waitForTimeout(200);
+  }
+  
+  console.log(`[WARNING] Grid did not update to show date range ${startDot} ~ ${endDot} within ${timeout}ms.`);
   return false;
 }
 
@@ -511,17 +560,36 @@ async function applyDateRange(currentPage, period) {
 
   // 1. Close calendar popup by clicking "확인" or "적용"
   console.log(`[DEBUG] Closing calendar popup...`);
-  const closed = await clickText(currentPage, "확인").catch(() => false) ||
-                 await clickText(currentPage, "적용").catch(() => false);
+  const closeBtn = await waitForClickableText(currentPage, "확인", 500) ||
+                    await waitForClickableText(currentPage, "적용", 500);
+  let closed = false;
+  if (closeBtn) {
+    await closeBtn.click({ timeout: 5000 }).catch(() => {});
+    await waitForRendered(currentPage);
+    closed = true;
+  }
   console.log(`[DEBUG] Calendar popup closed: ${closed}`);
 
   await currentPage.waitForTimeout(1000);
 
   // 2. Refresh main grid by clicking "조회" or "검색"
   console.log(`[DEBUG] Refreshing main grid...`);
-  const refreshed = await clickText(currentPage, "조회").catch(() => false) ||
-                    await clickText(currentPage, "검색").catch(() => false);
+  const queryBtn = await waitForClickableText(currentPage, "조회", 500) ||
+                   await waitForClickableText(currentPage, "검색", 500);
+  let refreshed = false;
+  if (queryBtn) {
+    await queryBtn.click({ timeout: 5000 }).catch(() => {});
+    await waitForRendered(currentPage);
+    refreshed = true;
+  }
   console.log(`[DEBUG] Grid refreshed: ${refreshed}`);
+
+  // 3. Wait for the iframe text to show the updated date range
+  const frames = await visibleFrames(currentPage);
+  const primaryFrame = frames[0];
+  if (primaryFrame) {
+    await waitForGridDateRange(primaryFrame, range);
+  }
 
   await waitForRendered(currentPage);
   return range.label;
