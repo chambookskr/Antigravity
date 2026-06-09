@@ -2,7 +2,6 @@ const elements = {
   form: document.querySelector("#extract-form"),
   id: document.querySelector("#id-input"),
   pw: document.querySelector("#pw-input"),
-  url: document.querySelector("#url-input"),
   year: document.querySelector("#year-input"),
   loginButton: document.querySelector("#login-button"),
   clearButton: document.querySelector("#clear-button"),
@@ -102,7 +101,7 @@ function shortError(message) {
 }
 
 async function openLogin() {
-  const url = elements.url.value.trim();
+  const url = "";
   const id = elements.id.value.trim();
   const pw = elements.pw.value.trim();
 
@@ -121,7 +120,7 @@ async function openLogin() {
 async function extract(event) {
   event.preventDefault();
 
-  const url = elements.url.value.trim();
+  const url = "";
   const id = elements.id.value.trim();
   const pw = elements.pw.value.trim();
   const months = checkedMonths();

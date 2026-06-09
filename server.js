@@ -1099,6 +1099,11 @@ async function extractByMonths(url, year, months, id, pw) {
           if (await currentPage.locator("#id").count() > 0) {
             if (id) await setInputValue(currentPage.locator("#id"), id);
             if (pw) await setInputValue(currentPage.locator("#pw"), pw);
+            const loginBtn = currentPage.locator('.btn_login, button[type="submit"], input[type="submit"], button:has-text("로그인")').first();
+            if (await loginBtn.isVisible().catch(() => false)) {
+              await loginBtn.click();
+              await currentPage.waitForTimeout(2000);
+            }
           }
         } catch (e) {}
       }
@@ -1253,7 +1258,8 @@ async function extractByMonths(url, year, months, id, pw) {
 
 async function openLogin(url, id, pw) {
   const currentPage = await page();
-  await currentPage.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
+  const targetUrl = url ? url.trim() : "https://searchad.naver.com/";
+  await currentPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
   await waitForRendered(currentPage);
 
   if (id || pw) {
@@ -1267,13 +1273,20 @@ async function openLogin(url, id, pw) {
         if (id) await setInputValue(currentPage.locator("#id"), id);
         if (pw) await setInputValue(currentPage.locator("#pw"), pw);
         console.log(`[DEBUG] Auto-filled Naver login credentials for: ${id}`);
+
+        const loginBtn = currentPage.locator('.btn_login, button[type="submit"], input[type="submit"], button:has-text("로그인")').first();
+        if (await loginBtn.isVisible().catch(() => false)) {
+          console.log('[DEBUG] Clicking login button...');
+          await loginBtn.click();
+          await currentPage.waitForTimeout(2000);
+        }
       }
     } catch (e) {
       console.log(`[DEBUG] Failed to autofill credentials: ${e.message}`);
     }
   }
 
-  return { message: "Chrome 창이 열렸습니다. 네이버 로그인을 완료한 뒤 추출을 다시 눌러 주세요." };
+  return { message: "Chrome 창이 열리고 자동 로그인을 시도했습니다. 로그인이 완료되면 추출을 눌러 주세요." };
 }
 
 async function serveStatic(req, res) {
