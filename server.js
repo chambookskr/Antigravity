@@ -815,27 +815,55 @@ async function readRowsFromFrame(frame) {
     const count = Math.min(await rows.count().catch(() => 0), 800);
     if (count < 2) continue;
 
-    const result = [];
-    for (let index = 0; index < count; index += 1) {
-      const row = rows.nth(index);
-      if (!(await row.isVisible().catch(() => false))) continue;
+    console.log(`[DEBUG] readRowsFromFrame: selector="${selector}" initially found ${count} rows.`);
 
-      const cells = row.locator('th, td, [role="columnheader"], [role="cell"], [role="gridcell"]');
-      const cellCount = Math.min(await cells.count().catch(() => 0), 80);
-      let values = [];
+    const uniqueRows = new Map();
+    let lastMapSize = 0;
+    let scrollAttempts = 0;
+    const maxScrollAttempts = 15;
 
-      if (cellCount > 1) {
-        values = (await cells.allInnerTexts().catch(() => [])).map(normalizeText);
-      } else {
-        values = normalizeText(await row.innerText().catch(() => ""))
-          .split(/\t|\n| {2,}/)
-          .map(normalizeText)
-          .filter(Boolean);
+    while (scrollAttempts < maxScrollAttempts) {
+      const currentRows = frame.locator(selector);
+      const currentCount = Math.min(await currentRows.count().catch(() => 0), 800);
+      if (currentCount < 2) break;
+
+      for (let index = 0; index < currentCount; index += 1) {
+        const row = currentRows.nth(index);
+        if (!(await row.isVisible().catch(() => false))) continue;
+
+        const cells = row.locator('th, td, [role="columnheader"], [role="cell"], [role="gridcell"]');
+        const cellCount = Math.min(await cells.count().catch(() => 0), 80);
+        let values = [];
+
+        if (cellCount > 1) {
+          values = (await cells.allInnerTexts().catch(() => [])).map(normalizeText);
+        } else {
+          values = normalizeText(await row.innerText().catch(() => ""))
+            .split(/\t|\n| {2,}/)
+            .map(normalizeText)
+            .filter(Boolean);
+        }
+
+        if (values.some(v => v !== "")) {
+          const key = values.join(" ");
+          uniqueRows.set(key, values);
+        }
       }
 
-      if (values.some(v => v !== "")) result.push(values);
+      if (uniqueRows.size === lastMapSize) {
+        break;
+      }
+      lastMapSize = uniqueRows.size;
+
+      // Scroll the last row into view to load next set of virtualized rows
+      const lastRow = currentRows.nth(currentCount - 1);
+      await lastRow.scrollIntoViewIfNeeded().catch(() => {});
+      await frame.page().waitForTimeout(350); // Wait for virtualized rendering
+      scrollAttempts++;
     }
 
+    const result = [...uniqueRows.values()];
+    console.log(`[DEBUG] readRowsFromFrame: collected ${result.length} unique rows after ${scrollAttempts} scrolls.`);
     if (result.length) return result;
   }
 
@@ -1056,7 +1084,13 @@ async function extractByMonths(url, year, months, id, pw) {
     console.log(`[DEBUG] Final target extraction URL: ${targetUrl}`);
     validateNaverUrl(targetUrl);
 
-    await currentPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    // Extract Account ID
+    const accountIdMatch = targetUrl.match(/ad-accounts\/(\d+)/);
+    const accountId = accountIdMatch ? accountIdMatch[1] : "2152870";
+    const reportUrl = `https://ads.naver.com/manage/ad-accounts/${accountId}/sa/reports/new?type=basic-keywordplus`;
+
+    console.log(`[DEBUG] Navigating to Report Builder: ${reportUrl}`);
+    await currentPage.goto(reportUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
     await waitForRendered(currentPage);
 
     if (looksLikeLogin(currentPage)) {
@@ -1071,35 +1105,136 @@ async function extractByMonths(url, year, months, id, pw) {
       return { loginRequired: true, rows: [], message: "Chrome에서 네이버 로그인을 완료한 뒤 다시 추출해 주세요." };
     }
 
+    const frame = currentPage.frames()[0];
+    await frame.waitForSelector('th', { timeout: 30000 }).catch(() => {});
+
+    // Ensure "광고그룹" column is added
+    let headers = frame.locator('th');
+    let count = await headers.count().catch(() => 0);
+    let headerTexts = [];
+    for (let i = 0; i < count; i++) {
+      headerTexts.push(await headers.nth(i).innerText().catch(() => ''));
+    }
+    console.log(`[DEBUG] Current Table Headers: ${headerTexts.join(' | ')}`);
+
+    const hasAdGroup = headerTexts.some(h => h.includes('광고그룹'));
+    if (!hasAdGroup) {
+      console.log('[DEBUG] Adding "광고그룹" column to the report builder...');
+      const adGroupItem = frame.locator('span:text-is("광고그룹"), div:text-is("광고그룹"), button:text-is("광고그룹")').first();
+      if (await adGroupItem.isVisible().catch(() => false)) {
+        await adGroupItem.dblclick();
+        await currentPage.waitForTimeout(3000);
+      }
+    }
+
+    // Determine contiguous date range
+    const sortedMonths = [...months].sort((a, b) => a - b);
+    const minMonth = sortedMonths[0];
+    const maxMonth = sortedMonths[sortedMonths.length - 1];
+
+    const rangeStart = monthRange(year, minMonth);
+    const rangeEnd = monthRange(year, maxMonth);
+
+    const startDate = rangeStart.startDotted;
+    const endDate = rangeEnd.endDotted;
+
+    console.log(`[DEBUG] Setting Date Range: ${startDate} ~ ${endDate}`);
+    const dateClickable = frame.locator('button:has-text("2026"), button:has-text("2025"), button:has-text("2027"), button:has-text("2028")').first();
+    if (await dateClickable.isVisible().catch(() => false)) {
+      await dateClickable.click();
+      await currentPage.waitForTimeout(2000);
+
+      const startInput = frame.locator('input[placeholder="YYYY.MM.DD."]').first();
+      const endInput = frame.locator('input[placeholder="YYYY.MM.DD."]').last();
+      
+      await startInput.fill(startDate);
+      await endInput.fill(endDate);
+      await currentPage.waitForTimeout(1000);
+
+      // Find confirmation button
+      const buttons = frame.locator('button, a, [role="button"], .ant-btn');
+      const btnCount = await buttons.count().catch(() => 0);
+      let confirmBtn = null;
+      for (let i = 0; i < btnCount; i++) {
+        const isVisible = await buttons.nth(i).isVisible().catch(() => false);
+        if (isVisible) {
+          const text = await buttons.nth(i).innerText().catch(() => '');
+          if (text.trim() === '확인' || text.trim() === '적용' || text.trim() === '확인하기') {
+            confirmBtn = buttons.nth(i);
+            break;
+          }
+        }
+      }
+      if (confirmBtn) {
+        await confirmBtn.click();
+      } else {
+        await endInput.press('Enter');
+      }
+      await currentPage.waitForTimeout(3000);
+    }
+
+    // Download CSV
+    console.log('[DEBUG] Triggering report download...');
+    const downloadBtn = frame.locator('button:has-text("다운로드"), a:has-text("다운로드"), [role="button"]:has-text("다운로드")').first();
+    const downloadPromise = currentPage.waitForEvent('download', { timeout: 45000 });
+    await downloadBtn.click();
+    
+    const download = await downloadPromise;
+    const downloadPath = path.join(appDir, 'exports', download.suggestedFilename());
+    await download.saveAs(downloadPath);
+    console.log(`[DEBUG] Download completed: ${downloadPath}`);
+
+    // Parse CSV and aggregate matching rows
+    const csvContent = await fs.readFile(downloadPath, 'utf8');
     const raw = [];
     const errors = [];
 
-    for (const group of targetGroups) {
-      console.log(`[DEBUG] Navigating to campaign URL to click group: ${group}`);
-      await currentPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
-      await waitForRendered(currentPage);
+    const lines = csvContent.split(/\r?\n/);
+    let headerIndex = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith('검색어,') || lines[i].includes('광고그룹')) {
+        headerIndex = i;
+        break;
+      }
+    }
+    if (headerIndex === -1) {
+      throw new Error("보고서 CSV 파일에서 헤더를 찾을 수 없습니다.");
+    }
 
-      const opened = await clickText(currentPage, group);
-      if (!opened) {
-        errors.push(`모든 월 / ${group}: 광고 그룹을 찾지 못했습니다.`);
-        continue;
+    const csvHeaders = lines[headerIndex].split(',');
+    const keywordIdx = csvHeaders.indexOf('검색어');
+    const adGroupIdx = csvHeaders.indexOf('광고그룹');
+    const dateIdx = csvHeaders.indexOf('일별');
+    const impressionsIdx = csvHeaders.indexOf('노출수');
+
+    if (keywordIdx === -1 || adGroupIdx === -1 || dateIdx === -1 || impressionsIdx === -1) {
+      throw new Error("보고서 CSV 파일 컬럼 구성이 올바르지 않습니다.");
+    }
+
+    for (let i = headerIndex + 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+
+      const cols = line.split(',');
+      if (cols.length < csvHeaders.length) continue;
+
+      const groupName = normalizeText(cols[adGroupIdx]);
+      const matchesTarget = targetGroups.some(target => groupName.includes(target));
+      if (!matchesTarget) continue;
+
+      // Filter out rows belonging to unselected months
+      const dateStr = normalizeText(cols[dateIdx]);
+      const dateParts = dateStr.split('.');
+      if (dateParts.length >= 2) {
+        const rowMonth = Number(dateParts[1]);
+        if (!months.includes(rowMonth)) continue;
       }
 
-      await openKeywordTab(currentPage);
+      const keyword = cleanKeywordText(cols[keywordIdx]);
+      const impressions = Number(cols[impressionsIdx]) || 0;
 
-      for (const period of periods) {
-        try {
-          const periodLabel = await applyDateRange(currentPage, period);
-          const rows = await readKeywordTable(currentPage, group, periodLabel);
-          if (!rows || !rows.length) {
-            errors.push(`${periodLabel} / ${group}: 키워드와 노출수 테이블을 찾지 못했습니다.`);
-          } else {
-            raw.push(...rows);
-          }
-        } catch (err) {
-          console.error(`[ERROR] Failed to extract period ${period.year}년 ${period.month}월 for group ${group}:`, err);
-          errors.push(`${period.year}년 ${period.month}월 / ${group}: 오류 - ${err.message}`);
-        }
+      if (isKeyword(keyword) && impressions >= 1) {
+        raw.push({ keyword, impressions });
       }
     }
 
