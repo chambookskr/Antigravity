@@ -397,21 +397,42 @@ async function openDatePanel(currentPage, timeout = 10000) {
 
 async function setInputValue(input, value) {
   await input.scrollIntoViewIfNeeded().catch(() => {});
+  
+  // Explicitly remove readonly and disabled attributes to allow typing
+  await input.evaluate((node) => {
+    node.removeAttribute("readonly");
+    node.removeAttribute("disabled");
+  }).catch(() => {});
+
   await input.click({ timeout: 5000 }).catch(() => {});
+  
+  // Select all text and delete it
+  await input.press('Control+A').catch(() => {});
+  await input.press('Backspace').catch(() => {});
+  await input.page().waitForTimeout(100);
+  
   try {
-    await input.fill(value, { timeout: 5000 });
-  } catch {
+    // Type value character by character to trigger React state updates
+    await input.pressSequentially(value, { delay: 30, timeout: 5000 });
+    // Press Enter to commit the typed value in React/Ant Design RangePicker
+    await input.press('Enter');
+    await input.page().waitForTimeout(500);
+  } catch (err) {
+    console.log(`[DEBUG] input.pressSequentially failed, falling back to direct DOM value setting: ${err.message}`);
     await input.evaluate(
       (node, nextValue) => {
-        node.removeAttribute("readonly");
-        node.removeAttribute("disabled");
         node.value = nextValue;
-        node.dispatchEvent(new Event("input", { bubbles: true }));
-        node.dispatchEvent(new Event("change", { bubbles: true }));
       },
       value
     );
   }
+  
+  // Dispatch React-compatible events
+  await input.evaluate((node) => {
+    node.dispatchEvent(new Event("input", { bubbles: true }));
+    node.dispatchEvent(new Event("change", { bubbles: true }));
+    node.dispatchEvent(new Event("blur", { bubbles: true }));
+  }).catch(() => {});
 }
 
 async function fillVisibleDateInputs(currentPage, range) {
@@ -1027,6 +1048,271 @@ async function saveCsv(rows) {
   return `/exports/${encodeURIComponent(fileName)}`;
 }
 
+async function sortByImpressions(frame) {
+  console.log(`[DEBUG] Attempting to sort by impressions...`);
+  
+  const headerSelectors = [
+    '.ag-header-cell',
+    'th',
+    '[role="columnheader"]',
+    '.ReactVirtualized__Table__headerTruncatedText'
+  ];
+  
+  let headerElement = null;
+  for (const selector of headerSelectors) {
+    const elements = frame.locator(selector);
+    const count = await elements.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const text = (await elements.nth(i).innerText().catch(() => '')).trim();
+      if (text === '노출수' || text === '노출 수' || text === '노출') {
+        headerElement = elements.nth(i);
+        break;
+      }
+    }
+    if (headerElement) break;
+  }
+  
+  if (!headerElement) {
+    console.log(`[WARNING] Could not find "노출수" header element to click.`);
+    return false;
+  }
+  
+  const isAlreadyDesc = await headerElement.evaluate(el => {
+    const cell = el.closest('.ag-header-cell') || el.closest('th') || el;
+    const sortAttr = cell.getAttribute('aria-sort');
+    if (sortAttr === 'descending') return true;
+    const classList = Array.from(cell.classList);
+    if (classList.some(c => c.includes('desc') || c.includes('sorted-desc'))) return true;
+    return false;
+  }).catch(() => false);
+  
+  if (isAlreadyDesc) {
+    console.log(`[DEBUG] Already sorted descending. No click needed.`);
+    return true;
+  }
+  
+  console.log(`[DEBUG] Clicking "노출수" header to sort...`);
+  await headerElement.click({ timeout: 5000 }).catch(() => {});
+  await frame.page().waitForTimeout(1500);
+  
+  const isDescAfterClick = await headerElement.evaluate(el => {
+    const cell = el.closest('.ag-header-cell') || el.closest('th') || el;
+    const sortAttr = cell.getAttribute('aria-sort');
+    if (sortAttr === 'descending') return true;
+    const classList = Array.from(cell.classList);
+    if (classList.some(c => c.includes('desc') || c.includes('sorted-desc'))) return true;
+    return false;
+  }).catch(() => false);
+  
+  if (!isDescAfterClick) {
+    console.log(`[DEBUG] Clicking "노출수" header second time to toggle to descending...`);
+    await headerElement.click({ timeout: 5000 }).catch(() => {});
+    await frame.page().waitForTimeout(1500);
+  }
+  
+  return true;
+}
+
+async function scrapeAdGroupKeywords(currentPage, group, periodLabel) {
+  console.log(`\n=== [DEBUG] scrapeAdGroupKeywords: ${group} ===`);
+  await openKeywordTab(currentPage);
+  
+  const frames = await visibleFrames(currentPage);
+  let primaryFrame = frames[0];
+  if (primaryFrame) {
+    let loaded = await waitForTableRows(primaryFrame);
+    if (!loaded) {
+      console.log(`[DEBUG] Table not loaded for group ${group}. Reloading page...`);
+      await currentPage.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+      await waitForRendered(currentPage);
+      await openKeywordTab(currentPage);
+      const newFrames = await visibleFrames(currentPage);
+      primaryFrame = newFrames[0] || primaryFrame;
+      await waitForTableRows(primaryFrame);
+    }
+  }
+  
+  if (!primaryFrame) {
+    throw new Error(`[${group}] 테이블 프레임을 찾을 수 없습니다.`);
+  }
+  
+  await sortByImpressions(primaryFrame).catch((err) => {
+    console.log(`[DEBUG] sortByImpressions failed: ${err.message}`);
+  });
+  
+  await goToPage1(primaryFrame).catch((err) => {
+    console.log(`[DEBUG] goToPage1 failed or not needed: ${err.message}`);
+  });
+  
+  const collected = [];
+  let pageNum = 1;
+  let hitZero = false;
+  
+  while (!hitZero) {
+    console.log(`[DEBUG] Reading page ${pageNum} for group ${group}...`);
+    const rows = await readRowsFromFrame(primaryFrame);
+    if (!rows.length) {
+      console.log(`[DEBUG] No rows found on page ${pageNum}`);
+      break;
+    }
+    
+    const parsed = [];
+    const columns = detectColumns(rows);
+    
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+      const cells = rows[rowIndex];
+      if (!cells.length) continue;
+      if (columns && rowIndex <= columns.headerRow) continue;
+      
+      let keyword = "";
+      let impressions = NaN;
+      
+      if (columns) {
+        keyword = cleanKeywordText(cells[columns.keywordIndex]);
+        impressions = numericValue(cells[columns.impressionsIndex]);
+      } else {
+        const rawKeyword = cells.find((cell) => isKeyword(cleanKeywordText(cell)));
+        keyword = rawKeyword ? cleanKeywordText(rawKeyword) : "";
+        const numbers = cells
+          .map((cell) => numericValue(cell))
+          .filter((value) => Number.isFinite(value) && value > 0);
+        impressions = numbers.length ? Math.max(...numbers) : NaN;
+      }
+      
+      const hasValidKeywordName = isKeyword(keyword);
+      const rawImpressionVal = columns ? cells[columns.impressionsIndex] : "";
+      const isZero = rawImpressionVal === "-" || rawImpressionVal === "0" || impressions === 0 || (!Number.isFinite(impressions) && hasValidKeywordName);
+      
+      if (hasValidKeywordName) {
+        if (isZero || impressions < 1) {
+          console.log(`[DEBUG] Hit 0 impressions row at index ${rowIndex}: keyword="${keyword}", raw="${rawImpressionVal}". Stopping.`);
+          hitZero = true;
+          break;
+        }
+        parsed.push({ group, period: periodLabel, keyword, impressions });
+      }
+    }
+    
+    console.log(`[DEBUG] Parsed ${parsed.length} active keywords on page ${pageNum}`);
+    collected.push(...parsed);
+    
+    if (hitZero) {
+      break;
+    }
+    
+    const prevSig = getPageSignature(rows);
+    const clicked = await clickNextPage(primaryFrame);
+    if (!clicked) {
+      console.log(`[DEBUG] No active next page button found. Stopping pagination loop.`);
+      break;
+    }
+    
+    pageNum++;
+    
+    let updated = false;
+    const startTime = Date.now();
+    while (Date.now() - startTime < 6000) {
+      const nextRows = await readRowsFromFrame(primaryFrame);
+      const nextSig = getPageSignature(nextRows);
+      if (nextSig !== prevSig) {
+        updated = true;
+        break;
+      }
+      await currentPage.waitForTimeout(250);
+    }
+    
+    if (!updated) {
+      console.log(`[DEBUG] Page didn't update in 6s. Waiting 1s just in case.`);
+      await currentPage.waitForTimeout(1000);
+    }
+  }
+  
+  return collected;
+}
+
+async function getAdGroupsOnView(currentPage) {
+  const frames = await visibleFrames(currentPage);
+  const list = [];
+  for (const frame of frames) {
+    const links = frame.locator('a');
+    const count = await links.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const link = links.nth(i);
+      const href = await link.getAttribute('href').catch(() => '');
+      const linkText = (await link.innerText().catch(() => '')).trim();
+      if (href && href.includes('/sa/adgroups/grp-')) {
+        list.push({ text: linkText, href, url: `https://ads.naver.com${href}` });
+      }
+    }
+  }
+  return list;
+}
+
+async function clickVisibleTextButton(currentPage, targetText) {
+  const frames = await visibleFrames(currentPage);
+  for (const frame of frames) {
+    const selectors = ['button', 'a', '[role="button"]', 'span', 'div'];
+    for (const selector of selectors) {
+      const elements = frame.locator(selector);
+      const count = await elements.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const el = elements.nth(i);
+        if (await el.isVisible().catch(() => false)) {
+          const text = (await el.innerText().catch(() => '')).trim();
+          if (text === targetText) {
+            console.log(`[DEBUG] Found matching element for "${targetText}": <${selector}>. Clicking it...`);
+            await el.click().catch(() => {});
+            await frame.page().waitForTimeout(1000);
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+async function applyCustomDateRange(currentPage, range) {
+  console.log(`[DEBUG] applyCustomDateRange: ${range.startDotted} ~ ${range.endDotted}`);
+
+  let filled = await fillVisibleDateInputs(currentPage, range);
+  console.log(`[DEBUG] First fill attempt result: ${filled}`);
+  if (!filled) {
+    console.log(`[DEBUG] Opening date panel...`);
+    const opened = await openDatePanel(currentPage);
+    console.log(`[DEBUG] Date panel opened: ${opened}`);
+    filled = await fillVisibleDateInputs(currentPage, range);
+    console.log(`[DEBUG] Second fill attempt result: ${filled}`);
+  }
+
+  if (!filled) {
+    throw new Error(
+      `기간 필터를 자동으로 조작하지 못했습니다. 열린 Chrome에서 기간 필터 영역이 보이도록 한 번 열어둔 뒤 다시 추출해 주세요.`
+    );
+  }
+
+  console.log(`[DEBUG] Closing calendar popup...`);
+  let closed = await clickVisibleTextButton(currentPage, "확인") ||
+                 await clickVisibleTextButton(currentPage, "적용");
+  console.log(`[DEBUG] Calendar popup closed: ${closed}`);
+
+  await currentPage.waitForTimeout(1000);
+
+  console.log(`[DEBUG] Refreshing main grid...`);
+  let refreshed = await clickVisibleTextButton(currentPage, "조회") ||
+                    await clickVisibleTextButton(currentPage, "검색");
+  console.log(`[DEBUG] Grid refreshed: ${refreshed}`);
+
+  const frames = await visibleFrames(currentPage);
+  const primaryFrame = frames[0];
+  if (primaryFrame) {
+    await waitForGridDateRange(primaryFrame, range);
+  }
+
+  await waitForRendered(currentPage);
+  return range.label;
+}
+
 async function extractByMonths(url, year, months, id, pw) {
   if (busy) throw new Error("이미 추출 중입니다. 잠시 뒤 다시 시도해 주세요.");
   busy = true;
@@ -1084,15 +1370,11 @@ async function extractByMonths(url, year, months, id, pw) {
     console.log(`[DEBUG] Final target extraction URL: ${targetUrl}`);
     validateNaverUrl(targetUrl);
 
-    // Extract Account ID
-    const accountIdMatch = targetUrl.match(/ad-accounts\/(\d+)/);
-    const accountId = accountIdMatch ? accountIdMatch[1] : "2152870";
-    const reportUrl = `https://ads.naver.com/manage/ad-accounts/${accountId}/sa/reports/new?type=basic-keywordplus`;
-
-    console.log(`[DEBUG] Navigating to Report Builder: ${reportUrl}`);
-    await currentPage.goto(reportUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    // Navigate to campaign URL
+    await currentPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
     await waitForRendered(currentPage);
 
+    // Login check
     if (looksLikeLogin(currentPage)) {
       if (id || pw) {
         try {
@@ -1110,28 +1392,6 @@ async function extractByMonths(url, year, months, id, pw) {
       return { loginRequired: true, rows: [], message: "Chrome에서 네이버 로그인을 완료한 뒤 다시 추출해 주세요." };
     }
 
-    const frame = currentPage.frames()[0];
-    await frame.waitForSelector('th', { timeout: 30000 }).catch(() => {});
-
-    // Ensure "광고그룹" column is added
-    let headers = frame.locator('th');
-    let count = await headers.count().catch(() => 0);
-    let headerTexts = [];
-    for (let i = 0; i < count; i++) {
-      headerTexts.push(await headers.nth(i).innerText().catch(() => ''));
-    }
-    console.log(`[DEBUG] Current Table Headers: ${headerTexts.join(' | ')}`);
-
-    const hasAdGroup = headerTexts.some(h => h.includes('광고그룹'));
-    if (!hasAdGroup) {
-      console.log('[DEBUG] Adding "광고그룹" column to the report builder...');
-      const adGroupItem = frame.locator('span:text-is("광고그룹"), div:text-is("광고그룹"), button:text-is("광고그룹")').first();
-      if (await adGroupItem.isVisible().catch(() => false)) {
-        await adGroupItem.dblclick();
-        await currentPage.waitForTimeout(3000);
-      }
-    }
-
     // Determine contiguous date range
     const sortedMonths = [...months].sort((a, b) => a - b);
     const minMonth = sortedMonths[0];
@@ -1140,107 +1400,63 @@ async function extractByMonths(url, year, months, id, pw) {
     const rangeStart = monthRange(year, minMonth);
     const rangeEnd = monthRange(year, maxMonth);
 
-    const startDate = rangeStart.startDotted;
-    const endDate = rangeEnd.endDotted;
+    const range = {
+      label: `${year}년 ${minMonth}월 ~ ${maxMonth}월`,
+      startDashed: rangeStart.startDashed,
+      endDashed: rangeEnd.endDashed,
+      startDotted: rangeStart.startDotted,
+      endDotted: rangeEnd.endDotted,
+      rangeDotted: `${rangeStart.startDotted} ~ ${rangeEnd.endDotted}`,
+      rangeDashed: `${rangeStart.startDashed} ~ ${rangeEnd.endDashed}`,
+    };
 
-    console.log(`[DEBUG] Setting Date Range: ${startDate} ~ ${endDate}`);
-    const dateClickable = frame.locator('button:has-text("2026"), button:has-text("2025"), button:has-text("2027"), button:has-text("2028")').first();
-    if (await dateClickable.isVisible().catch(() => false)) {
-      await dateClickable.click();
-      await currentPage.waitForTimeout(2000);
+    console.log(`[DEBUG] Applying date range: ${range.rangeDotted}`);
+    await applyCustomDateRange(currentPage, range);
 
-      const startInput = frame.locator('input[placeholder="YYYY.MM.DD."]').first();
-      const endInput = frame.locator('input[placeholder="YYYY.MM.DD."]').last();
-      
-      await startInput.fill(startDate);
-      await endInput.fill(endDate);
-      await currentPage.waitForTimeout(1000);
-
-      // Find confirmation button
-      const buttons = frame.locator('button, a, [role="button"], .ant-btn');
-      const btnCount = await buttons.count().catch(() => 0);
-      let confirmBtn = null;
-      for (let i = 0; i < btnCount; i++) {
-        const isVisible = await buttons.nth(i).isVisible().catch(() => false);
-        if (isVisible) {
-          const text = await buttons.nth(i).innerText().catch(() => '');
-          if (text.trim() === '확인' || text.trim() === '적용' || text.trim() === '확인하기') {
-            confirmBtn = buttons.nth(i);
-            break;
-          }
-        }
-      }
-      if (confirmBtn) {
-        await confirmBtn.click();
+    // Find all target ad groups on campaign view
+    const allGroups = await getAdGroupsOnView(currentPage);
+    console.log(`[DEBUG] Found all groups on campaign view:`, allGroups.map(g => g.text));
+    
+    const groupsToScrape = [];
+    for (const target of targetGroups) {
+      const found = allGroups.find(g => g.text.includes(target));
+      if (found) {
+        groupsToScrape.push({ targetName: target, ...found });
       } else {
-        await endInput.press('Enter');
+        console.log(`[WARNING] Target ad group "${target}" not found on campaign page.`);
       }
-      await currentPage.waitForTimeout(3000);
     }
 
-    // Download CSV
-    console.log('[DEBUG] Triggering report download...');
-    const downloadBtn = frame.locator('button:has-text("다운로드"), a:has-text("다운로드"), [role="button"]:has-text("다운로드")').first();
-    const downloadPromise = currentPage.waitForEvent('download', { timeout: 45000 });
-    await downloadBtn.click();
-    
-    const download = await downloadPromise;
-    const downloadPath = path.join(appDir, 'exports', download.suggestedFilename());
-    await download.saveAs(downloadPath);
-    console.log(`[DEBUG] Download completed: ${downloadPath}`);
+    if (!groupsToScrape.length) {
+      throw new Error("대상 광고 그룹(니즈키워드, 지역+마음수련, 지역+명상, 지역+상담)을 찾을 수 없습니다.");
+    }
 
-    // Parse CSV and aggregate matching rows
-    const csvContent = await fs.readFile(downloadPath, 'utf8');
     const raw = [];
     const errors = [];
 
-    const lines = csvContent.split(/\r?\n/);
-    let headerIndex = -1;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].startsWith('검색어,') || lines[i].includes('광고그룹')) {
-        headerIndex = i;
-        break;
+    // Scrape each ad group using click navigation to preserve React state
+    for (const groupInfo of groupsToScrape) {
+      console.log(`[DEBUG] Navigating to ad group by clicking link: ${groupInfo.text}`);
+      
+      const link = currentPage.locator(`a[href="${groupInfo.href}"]`).first();
+      if (await link.count() === 0) {
+        throw new Error(`광고 그룹 링크를 찾을 수 없습니다: ${groupInfo.text}`);
       }
-    }
-    if (headerIndex === -1) {
-      throw new Error("보고서 CSV 파일에서 헤더를 찾을 수 없습니다.");
-    }
+      
+      await link.click();
+      await waitForRendered(currentPage);
 
-    const csvHeaders = lines[headerIndex].split(',');
-    const keywordIdx = csvHeaders.indexOf('검색어');
-    const adGroupIdx = csvHeaders.indexOf('광고그룹');
-    const dateIdx = csvHeaders.indexOf('일별');
-    const impressionsIdx = csvHeaders.indexOf('노출수');
-
-    if (keywordIdx === -1 || adGroupIdx === -1 || dateIdx === -1 || impressionsIdx === -1) {
-      throw new Error("보고서 CSV 파일 컬럼 구성이 올바르지 않습니다.");
-    }
-
-    for (let i = headerIndex + 1; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-
-      const cols = line.split(',');
-      if (cols.length < csvHeaders.length) continue;
-
-      const groupName = normalizeText(cols[adGroupIdx]);
-      const matchesTarget = targetGroups.some(target => groupName.includes(target));
-      if (!matchesTarget) continue;
-
-      // Filter out rows belonging to unselected months
-      const dateStr = normalizeText(cols[dateIdx]);
-      const dateParts = dateStr.split('.');
-      if (dateParts.length >= 2) {
-        const rowMonth = Number(dateParts[1]);
-        if (!months.includes(rowMonth)) continue;
+      try {
+        const rows = await scrapeAdGroupKeywords(currentPage, groupInfo.targetName, range.label);
+        raw.push(...rows);
+      } catch (err) {
+        console.error(`[ERROR] Failed to scrape group ${groupInfo.text}:`, err);
+        errors.push(`${groupInfo.text}: ${err.message}`);
       }
-
-      const keyword = cleanKeywordText(cols[keywordIdx]);
-      const impressions = Number(cols[impressionsIdx]) || 0;
-
-      if (isKeyword(keyword) && impressions >= 1) {
-        raw.push({ keyword, impressions });
-      }
+      
+      console.log(`[DEBUG] Going back to campaign page...`);
+      await currentPage.goBack();
+      await waitForRendered(currentPage);
     }
 
     const rows = aggregateRows(raw);
