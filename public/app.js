@@ -1,5 +1,7 @@
 const elements = {
   form: document.querySelector("#extract-form"),
+  id: document.querySelector("#id-input"),
+  pw: document.querySelector("#pw-input"),
   url: document.querySelector("#url-input"),
   year: document.querySelector("#year-input"),
   loginButton: document.querySelector("#login-button"),
@@ -101,15 +103,13 @@ function shortError(message) {
 
 async function openLogin() {
   const url = elements.url.value.trim();
-  if (!url) {
-    setStatus("URL을 입력해 주세요.", "warn");
-    return;
-  }
+  const id = elements.id.value.trim();
+  const pw = elements.pw.value.trim();
 
   setBusy(true);
   setStatus("Chrome을 여는 중입니다...");
   try {
-    const data = await postJson("/api/open-login", { url });
+    const data = await postJson("/api/open-login", { url, id, pw });
     setStatus(data.message, "ok");
   } catch (error) {
     setStatus(error.message, "warn");
@@ -122,11 +122,10 @@ async function extract(event) {
   event.preventDefault();
 
   const url = elements.url.value.trim();
+  const id = elements.id.value.trim();
+  const pw = elements.pw.value.trim();
   const months = checkedMonths();
-  if (!url) {
-    setStatus("URL을 입력해 주세요.", "warn");
-    return;
-  }
+
   if (!months.length) {
     setStatus("추출할 월을 하나 이상 체크해 주세요.", "warn");
     return;
@@ -139,6 +138,8 @@ async function extract(event) {
   try {
     const data = await postJson("/api/extract", {
       url,
+      id,
+      pw,
       year: Number(elements.year.value),
       months,
     });

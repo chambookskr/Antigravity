@@ -20,13 +20,23 @@
         <section class="tool-grid" aria-label="노출 키워드 추출 도구">
           <form class="panel input-panel" id="extract-form">
             <div class="field">
-              <label for="url-input">네이버 URL</label>
+              <label for="id-input">네이버 ID (선택사항)</label>
+              <input id="id-input" type="text" placeholder="아이디를 입력하세요" />
+            </div>
+
+            <div class="field">
+              <label for="pw-input">네이버 비밀번호 (선택사항)</label>
+              <input id="pw-input" type="password" placeholder="비밀번호를 입력하세요" />
+            </div>
+
+            <div class="field">
+              <label for="url-input">네이버 URL (선택사항)</label>
               <input
                 id="url-input"
                 type="url"
                 inputmode="url"
-                placeholder="https://..."
-                value="https://ads.naver.com/manage/ad-accounts/1932448/sa/campaigns/cmp-a001-01-000000010367579"
+                placeholder="비워둘 경우 크롬 창의 현재 캠페인 화면에서 추출합니다."
+                value=""
               />
             </div>
 

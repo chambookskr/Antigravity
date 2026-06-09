@@ -787,17 +787,75 @@ async function saveCsv(rows) {
   return `/exports/${encodeURIComponent(fileName)}`;
 }
 
-async function extractByMonths(url, year, months) {
+async function extractByMonths(url, year, months, id, pw) {
   if (busy) throw new Error("이미 추출 중입니다. 잠시 뒤 다시 시도해 주세요.");
   busy = true;
 
   try {
     const periods = validPeriods(year, months);
     const currentPage = await page();
-    await currentPage.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
+    
+    let targetUrl = url ? url.trim() : "";
+    if (!targetUrl) {
+      const currentUrl = currentPage.url();
+      console.log(`[DEBUG] Auto-detected URL from active Chrome tab: ${currentUrl}`);
+      
+      if (
+        !currentUrl.includes("ads.naver.com") || 
+        (!currentUrl.includes("/sa/campaigns/cmp-") && !currentUrl.includes("/sa/adgroups/grp-"))
+      ) {
+        throw new Error(
+          "크롬 자동화 창에서 캠페인 상세 화면(광고그룹 목록이 보이는 화면)으로 이동한 뒤 다시 추출해 주세요."
+        );
+      }
+      
+      const match = currentUrl.match(/https:\/\/ads\.naver\.com\/manage\/ad-accounts\/\d+\/sa\/campaigns\/cmp-[a-zA-Z0-9-]+/);
+      if (match) {
+        targetUrl = match[0];
+      } else {
+        const adgroupMatch = currentUrl.match(/https:\/\/ads\.naver\.com\/manage\/ad-accounts\/\d+\/sa\/adgroups\/grp-[a-zA-Z0-9-]+/);
+        if (adgroupMatch) {
+          let campaignLink = "";
+          for (const frame of await visibleFrames(currentPage)) {
+            const locator = frame.locator('a[href*="/sa/campaigns/cmp-"]');
+            if (await locator.count() > 0) {
+              campaignLink = await locator.first().getAttribute("href");
+              break;
+            }
+          }
+          if (campaignLink) {
+            const parsedUrl = new URL(currentPage.url());
+            targetUrl = `${parsedUrl.protocol}//${parsedUrl.host}${campaignLink}`;
+          }
+        }
+      }
+      
+      if (!targetUrl) {
+        if (currentUrl.includes("/sa/campaigns/cmp-")) {
+          targetUrl = currentUrl;
+        } else {
+          throw new Error(
+            "크롬 자동화 창에서 캠페인 상세 화면으로 이동한 뒤 다시 추출해 주세요."
+          );
+        }
+      }
+    }
+
+    console.log(`[DEBUG] Final target extraction URL: ${targetUrl}`);
+    validateNaverUrl(targetUrl);
+
+    await currentPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
     await waitForRendered(currentPage);
 
     if (looksLikeLogin(currentPage)) {
+      if (id || pw) {
+        try {
+          if (await currentPage.locator("#id").count() > 0) {
+            if (id) await setInputValue(currentPage.locator("#id"), id);
+            if (pw) await setInputValue(currentPage.locator("#pw"), pw);
+          }
+        } catch (e) {}
+      }
       return { loginRequired: true, rows: [], message: "Chrome에서 네이버 로그인을 완료한 뒤 다시 추출해 주세요." };
     }
 
@@ -806,7 +864,7 @@ async function extractByMonths(url, year, months) {
 
     for (const period of periods) {
       const periodLabel = await applyDateRange(currentPage, period);
-      const result = await readGroups(currentPage, periodLabel, url);
+      const result = await readGroups(currentPage, periodLabel, targetUrl);
       raw.push(...result.raw);
       errors.push(...result.errors);
     }
@@ -824,10 +882,28 @@ async function extractByMonths(url, year, months) {
   }
 }
 
-async function openLogin(url) {
+async function openLogin(url, id, pw) {
   const currentPage = await page();
   await currentPage.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
   await waitForRendered(currentPage);
+
+  if (id || pw) {
+    try {
+      const loginUrl = currentPage.url();
+      if (loginUrl.includes("nid.naver.com") || loginUrl.includes("login")) {
+        await currentPage.waitForSelector("#id", { timeout: 5000 });
+      }
+      
+      if (await currentPage.locator("#id").count() > 0) {
+        if (id) await setInputValue(currentPage.locator("#id"), id);
+        if (pw) await setInputValue(currentPage.locator("#pw"), pw);
+        console.log(`[DEBUG] Auto-filled Naver login credentials for: ${id}`);
+      }
+    } catch (e) {
+      console.log(`[DEBUG] Failed to autofill credentials: ${e.message}`);
+    }
+  }
+
   return { message: "Chrome 창이 열렸습니다. 네이버 로그인을 완료한 뒤 추출을 다시 눌러 주세요." };
 }
 
@@ -883,16 +959,16 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && req.url === "/api/open-login") {
       const body = await readJson(req);
-      const url = validateNaverUrl(body.url);
-      const result = await openLogin(url);
+      const url = body.url ? validateNaverUrl(body.url) : "https://searchad.naver.com/";
+      const result = await openLogin(url, body.id, body.pw);
       sendJson(res, 200, { ok: true, ...result });
       return;
     }
 
     if (req.method === "POST" && req.url === "/api/extract") {
       const body = await readJson(req);
-      const url = validateNaverUrl(body.url);
-      const result = await extractByMonths(url, body.year, body.months);
+      const url = body.url ? validateNaverUrl(body.url) : "";
+      const result = await extractByMonths(url, body.year, body.months, body.id, body.pw);
       sendJson(res, 200, { ok: true, ...result });
       return;
     }
