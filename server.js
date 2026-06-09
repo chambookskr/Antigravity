@@ -308,6 +308,29 @@ async function clickText(currentPage, text, timeout = 12000) {
   return true;
 }
 
+async function hasVisibleDateInputs(currentPage) {
+  for (const frame of await visibleFrames(currentPage)) {
+    const inputs = frame.locator("input");
+    const count = await inputs.count().catch(() => 0);
+    let candidates = 0;
+    for (let index = 0; index < count; index += 1) {
+      const input = inputs.nth(index);
+      if (!(await input.isVisible().catch(() => false))) continue;
+      const type = normalizeText(await input.getAttribute("type").catch(() => ""));
+      const val = normalizeText(await input.inputValue().catch(() => ""));
+      const placeholder = normalizeText(await input.getAttribute("placeholder").catch(() => ""));
+      const aria = normalizeText(await input.getAttribute("aria-label").catch(() => ""));
+      const title = normalizeText(await input.getAttribute("title").catch(() => ""));
+      const meta = `${type} ${placeholder} ${aria} ${title} ${val}`;
+      if (type === "date" || /날짜|기간|시작|종료|date|from|to/i.test(meta) || /^\d{4}[-.]\d{1,2}[-.]\d{1,2}\.?$/.test(val)) {
+        candidates++;
+      }
+    }
+    if (candidates >= 1) return true;
+  }
+  return false;
+}
+
 async function openDatePanel(currentPage, timeout = 10000) {
   console.log(`[DEBUG] Running openDatePanel...`);
   const selectors = [
@@ -354,10 +377,17 @@ async function openDatePanel(currentPage, timeout = 10000) {
     console.log(`[DEBUG] Found date panel button/input to click.`);
     await locator.click({ timeout: 8000 }).catch(() => {});
     await currentPage.waitForTimeout(500);
-    const c1 = await clickText(currentPage, "직접입력").catch(() => false);
-    const c2 = await clickText(currentPage, "직접 설정").catch(() => false);
-    const c3 = await clickText(currentPage, "사용자 지정").catch(() => false);
-    console.log(`[DEBUG] Clicked sub-actions - 직접입력: ${c1}, 직접 설정: ${c2}, 사용자 지정: ${c3}`);
+
+    const hasInputs = await hasVisibleDateInputs(currentPage);
+    if (!hasInputs) {
+      console.log(`[DEBUG] Inputs not visible after click. Trying presets...`);
+      const c1 = await clickText(currentPage, "직접입력", 1000).catch(() => false);
+      const c2 = await clickText(currentPage, "직접 설정", 1000).catch(() => false);
+      const c3 = await clickText(currentPage, "사용자 지정", 1000).catch(() => false);
+      console.log(`[DEBUG] Clicked sub-actions - 직접입력: ${c1}, 직접 설정: ${c2}, 사용자 지정: ${c3}`);
+    } else {
+      console.log(`[DEBUG] Date inputs are already visible. Skipping presets.`);
+    }
     return true;
   }
 
@@ -386,33 +416,44 @@ async function setInputValue(input, value) {
 
 async function fillVisibleDateInputs(currentPage, range) {
   console.log(`[DEBUG] Running fillVisibleDateInputs... Target range: ${JSON.stringify(range)}`);
-  for (const frame of await visibleFrames(currentPage)) {
+  
+  const frames = await visibleFrames(currentPage);
+  console.log(`[DEBUG] Total active frames to scan: ${frames.length}`);
+  
+  for (let fIdx = 0; fIdx < frames.length; fIdx++) {
+    const frame = frames[fIdx];
     const inputs = frame.locator("input");
-    const count = Math.min(await inputs.count().catch(() => 0), 80);
+    const count = Math.min(await inputs.count().catch(() => 0), 120);
+    console.log(`[DEBUG]   Frame [${fIdx}] (URL: ${frame.url()}) has ${count} input elements.`);
     const candidates = [];
 
     for (let index = 0; index < count; index += 1) {
       const input = inputs.nth(index);
-      if (!(await input.isVisible().catch(() => false))) continue;
-
+      const isVis = await input.isVisible().catch(() => false);
+      const isEnabled = await input.isEnabled().catch(() => false);
       const type = normalizeText(await input.getAttribute("type").catch(() => ""));
       const placeholder = normalizeText(await input.getAttribute("placeholder").catch(() => ""));
       const aria = normalizeText(await input.getAttribute("aria-label").catch(() => ""));
       const title = normalizeText(await input.getAttribute("title").catch(() => ""));
       const value = normalizeText(await input.inputValue().catch(() => ""));
-      const meta = `${type} ${placeholder} ${aria} ${title} ${value}`;
+      const className = normalizeText(await input.getAttribute("class").catch(() => ""));
+      const meta = `type="${type}" placeholder="${placeholder}" aria="${aria}" title="${title}" value="${value}" class="${className}"`;
+      
+      console.log(`[DEBUG]     Input [${index}]: isVisible=${isVis}, isEnabled=${isEnabled}, ${meta}`);
+
+      if (!isVis) continue;
 
       if (
         type === "date" ||
         /날짜|기간|시작|종료|date|from|to/i.test(meta) ||
         /^\d{4}[-.]\d{1,2}[-.]\d{1,2}\.?$/.test(value)
       ) {
-        console.log(`[DEBUG] Found date input candidate: index=${index}, meta="${meta}"`);
+        console.log(`[DEBUG]       -> MATCHED date candidate`);
         candidates.push({ input, meta, type });
       }
     }
 
-    console.log(`[DEBUG] Candidates count: ${candidates.length}`);
+    console.log(`[DEBUG]   Candidates count in Frame [${fIdx}]: ${candidates.length}`);
     if (candidates.length >= 2) {
       const useDashed = candidates.some((item) => item.type === "date" || /\d{4}-\d{1,2}-\d{1,2}/.test(item.meta));
       const hasTrailingDot = candidates.some((item) => /\d{4}[-.]\d{1,2}[-.]\d{1,2}\./.test(item.meta));
@@ -427,7 +468,7 @@ async function fillVisibleDateInputs(currentPage, range) {
         endVal += ".";
       }
       
-      console.log(`[DEBUG] Filling inputs: startVal="${startVal}", endVal="${endVal}"`);
+      console.log(`[DEBUG]   Filling inputs in Frame [${fIdx}]: startVal="${startVal}", endVal="${endVal}"`);
       await setInputValue(startInput, startVal);
       await setInputValue(endInput, endVal);
       return true;
@@ -439,7 +480,7 @@ async function fillVisibleDateInputs(currentPage, range) {
       if (hasTrailingDot) {
         rangeVal = rangeVal.replace(/(\d{4}\.\d{2}\.\d{2})/g, "$1.");
       }
-      console.log(`[DEBUG] Filling single input: rangeVal="${rangeVal}"`);
+      console.log(`[DEBUG]   Filling single input in Frame [${fIdx}]: rangeVal="${rangeVal}"`);
       await setInputValue(candidates[0].input, rangeVal);
       return true;
     }
